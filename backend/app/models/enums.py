@@ -1,6 +1,5 @@
 from enum import Enum
 
-
 class TransactionStatus(str, Enum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
@@ -54,3 +53,10 @@ class ExceptionSeverity(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+class InvoiceStatus(str, Enum):
+    DRAFT = "DRAFT"
+    ISSUED = "ISSUED"
+    PAID = "PAID"
+    OVERDUE = "OVERDUE"
+    CANCELLED = "CANCELLED"

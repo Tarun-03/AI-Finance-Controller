@@ -3,11 +3,29 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import DateTime, Enum, Numeric, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
 from app.models.enums import TransactionStatus, TransactionType
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.payment import Payment
+
+from app.models.invoice import Invoice
+
+invoice: Mapped["Invoice | None"] = relationship(
+    back_populates="transaction",
+    uselist=False,
+)
+
+from app.models.settlement import Settlement
+
+settlement: Mapped["Settlement | None"] = relationship(
+    back_populates="transaction",
+    uselist=False,
+)
 
 class Transaction(BaseModel):
     __tablename__ = "transactions"
@@ -56,4 +74,9 @@ class Transaction(BaseModel):
     transaction_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+
+    payment: Mapped["Payment | None"] = relationship(
+        back_populates="transaction",
+        uselist=False,
     )

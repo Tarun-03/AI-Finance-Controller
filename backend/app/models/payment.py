@@ -2,7 +2,9 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+import uuid
+from sqlalchemy.dialects.postgresql import UUID
 
 from app.models.base import BaseModel
 from app.models.enums import PaymentMethod, PaymentStatus
@@ -18,9 +20,9 @@ class Payment(BaseModel):
         index=True,
     )
 
-    transaction_id: Mapped[str] = mapped_column(
-        String(50),
-        ForeignKey("transactions.transaction_id"),
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("transactions.id"),
         unique=True,
         nullable=False,
         index=True,
@@ -50,4 +52,8 @@ class Payment(BaseModel):
     payment_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+
+    transaction: Mapped["Transaction"] = relationship(
+        back_populates="payment",
     )
