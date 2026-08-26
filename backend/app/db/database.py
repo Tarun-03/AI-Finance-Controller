@@ -1,4 +1,4 @@
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import create_engine
 
 from app.core.config import settings
 

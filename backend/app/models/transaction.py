@@ -15,24 +15,8 @@ if TYPE_CHECKING:
 
 from app.models.invoice import Invoice
 from app.models.reconciliation import Reconciliation
-
-
-reconciliation: Mapped["Reconciliation | None"] = relationship(
-    back_populates="transaction",
-    uselist=False,
-)
-
-invoice: Mapped["Invoice | None"] = relationship(
-    back_populates="transaction",
-    uselist=False,
-)
-
 from app.models.settlement import Settlement
 
-settlement: Mapped["Settlement | None"] = relationship(
-    back_populates="transaction",
-    uselist=False,
-)
 
 class Transaction(BaseModel):
     __tablename__ = "transactions"
@@ -84,6 +68,23 @@ class Transaction(BaseModel):
     )
 
     payment: Mapped["Payment | None"] = relationship(
+        back_populates="transaction",
+        uselist=False,
+    )
+
+    reconciliation: Mapped["Reconciliation | None"] = relationship(
+        back_populates="transaction",
+        uselist=False,
+    )
+
+    invoice: Mapped["Invoice | None"] = relationship(
+        back_populates="transaction",
+        uselist=False,
+    )
+
+
+
+    settlement: Mapped["Settlement | None"] = relationship(
         back_populates="transaction",
         uselist=False,
     )
