@@ -1,10 +1,18 @@
 from fastapi import FastAPI
 
+from app.api.router import api_router
+
+
 app = FastAPI(
     title="AI Finance Controller",
-    description="Agentic AI-powered finance reconciliation platform",
+    description=(
+        "Agentic AI-powered finance reconciliation platform"
+    ),
     version="0.1.0",
 )
+
+
+app.include_router(api_router)
 
 
 @app.get("/")

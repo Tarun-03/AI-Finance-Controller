@@ -1,5 +1,6 @@
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
+from uuid import UUID
 
 from app.models.exception import ExceptionRecord
 
@@ -36,3 +37,13 @@ def get_open_exceptions(
     )
 
     return list(db.scalars(statement).all())
+
+def get_exception_by_id(
+    db: Session,
+    exception_id: UUID,
+) -> ExceptionRecord | None:
+    statement = select(ExceptionRecord).where(
+        ExceptionRecord.id == exception_id
+    )
+
+    return db.scalar(statement)

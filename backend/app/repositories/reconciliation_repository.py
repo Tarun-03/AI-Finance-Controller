@@ -1,5 +1,6 @@
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
+from uuid import UUID
 
 from app.models.reconciliation import Reconciliation
 
@@ -37,3 +38,13 @@ def get_all_reconciliations(
     )
 
     return list(db.scalars(statement).all())
+
+def get_reconciliation_by_id(
+    db: Session,
+    reconciliation_id: UUID,
+) -> Reconciliation | None:
+    statement = select(Reconciliation).where(
+        Reconciliation.id == reconciliation_id
+    )
+
+    return db.scalar(statement)
