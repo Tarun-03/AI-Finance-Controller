@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from app.models.payment import Payment
 
 from app.models.invoice import Invoice
+from app.models.reconciliation import Reconciliation
+
+
+reconciliation: Mapped["Reconciliation | None"] = relationship(
+    back_populates="transaction",
+    uselist=False,
+)
 
 invoice: Mapped["Invoice | None"] = relationship(
     back_populates="transaction",
