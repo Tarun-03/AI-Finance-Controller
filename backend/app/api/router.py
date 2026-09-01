@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
+    agent,
     exceptions,
     reconciliation,
     transactions,
@@ -21,4 +22,8 @@ api_router.include_router(
 
 api_router.include_router(
     exceptions.router,
+)
+
+api_router.include_router(
+    agent.router,
 )
