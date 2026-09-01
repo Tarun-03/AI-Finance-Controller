@@ -13,6 +13,7 @@ from app.agents.nodes import (
     human_review_node,
     load_context_node,
     resolve_node,
+    llm_investigation_node,
 )
 from app.agents.state import FinanceAgentState
 
@@ -23,6 +24,11 @@ def route_after_context(
     "assess_risk",
     "failed",
 ]:
+    """
+    Route execution after loading the exception
+    and transaction context.
+    """
+
     if state.get("error"):
         return "failed"
 
@@ -36,6 +42,14 @@ def route_after_guardrail(
     "human_review",
     "escalate",
 ]:
+    """
+    Determine the final execution path.
+
+    Guardrails always have authority over the
+    final action.
+    """
+
+    # Any guardrail failure goes to human review.
     if not state.get("guardrail_passed"):
         return "human_review"
 
@@ -55,9 +69,18 @@ def route_after_guardrail(
 def build_finance_graph(
     db: Session,
 ):
+    """
+    Build and compile the finance controller
+    LangGraph workflow.
+    """
+
     builder = StateGraph(
         FinanceAgentState
     )
+
+    # --------------------------------------------------
+    # NODES
+    # --------------------------------------------------
 
     builder.add_node(
         "load_context",
@@ -75,6 +98,11 @@ def build_finance_graph(
     builder.add_node(
         "decide_action",
         decide_action_node,
+    )
+
+    builder.add_node(
+        "llm_investigation",
+        llm_investigation_node,
     )
 
     builder.add_node(
@@ -102,30 +130,63 @@ def build_finance_graph(
         failed_node,
     )
 
+    # --------------------------------------------------
+    # START
+    # --------------------------------------------------
+
     builder.add_edge(
         START,
         "load_context",
     )
+
+    # --------------------------------------------------
+    # CONTEXT → RISK
+    # --------------------------------------------------
 
     builder.add_conditional_edges(
         "load_context",
         route_after_context,
     )
 
+    # --------------------------------------------------
+    # RISK → DECISION
+    # --------------------------------------------------
+
     builder.add_edge(
         "assess_risk",
         "decide_action",
     )
 
+    # --------------------------------------------------
+    # DECISION → LLM INVESTIGATION
+    # --------------------------------------------------
+
     builder.add_edge(
         "decide_action",
+        "llm_investigation",
+    )
+
+    # --------------------------------------------------
+    # LLM INVESTIGATION → GUARDRAIL
+    # --------------------------------------------------
+
+    builder.add_edge(
+        "llm_investigation",
         "guardrail",
     )
+
+    # --------------------------------------------------
+    # GUARDRAIL → FINAL ACTION
+    # --------------------------------------------------
 
     builder.add_conditional_edges(
         "guardrail",
         route_after_guardrail,
     )
+
+    # --------------------------------------------------
+    # TERMINAL NODES
+    # --------------------------------------------------
 
     builder.add_edge(
         "resolve",

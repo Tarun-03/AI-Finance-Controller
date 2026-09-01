@@ -1,6 +1,17 @@
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class AgentAnalysis(BaseModel):
+    analysis: str
+
+    recommended_action: str
+
+    confidence: Decimal = Field(
+        ge=0,
+        le=1,
+    )
 
 
 class AgentInvestigationResponse(BaseModel):
@@ -19,7 +30,10 @@ class AgentInvestigationResponse(BaseModel):
     risk_score: Decimal | None = None
 
     recommendation: str | None = None
+
     reasoning: str | None = None
+
+    agent_analysis: AgentAnalysis | None = None
 
     guardrail_passed: bool | None = None
     guardrail_reason: str | None = None
@@ -27,4 +41,5 @@ class AgentInvestigationResponse(BaseModel):
     requires_human_approval: bool = False
 
     final_action: str | None = None
+
     error: str | None = None

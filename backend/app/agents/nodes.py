@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.agents.state import FinanceAgentState
 from app.models.exception import ExceptionRecord
 from app.models.transaction import Transaction
+from app.services.llm_service import LLMService
 
 
 AUTO_RESOLVE_LIMIT = Decimal("100.00")
@@ -129,7 +130,8 @@ def decide_action_node(
         or Decimal("0.00")
     )
 
-    # Missing records should never be auto-resolved.
+    # Missing financial records must never be
+    # automatically resolved.
     if exception_type in {
         "MISSING_PAYMENT",
         "MISSING_SETTLEMENT",
@@ -143,6 +145,8 @@ def decide_action_node(
             "requires_human_approval": True,
         }
 
+    # Small differences can potentially be
+    # automatically resolved.
     if difference <= AUTO_RESOLVE_LIMIT:
         return {
             "recommendation": "AUTO_RESOLVE",
@@ -153,6 +157,7 @@ def decide_action_node(
             "requires_human_approval": False,
         }
 
+    # Moderate differences require human review.
     if difference <= HUMAN_REVIEW_LIMIT:
         return {
             "recommendation": "HUMAN_REVIEW",
@@ -163,6 +168,7 @@ def decide_action_node(
             "requires_human_approval": True,
         }
 
+    # Large differences must be escalated.
     return {
         "recommendation": "ESCALATE",
         "reasoning": (
@@ -172,13 +178,83 @@ def decide_action_node(
         "requires_human_approval": True,
     }
 
+def llm_investigation_node(
+    state: FinanceAgentState,
+) -> FinanceAgentState:
+
+    if state.get("error"):
+        return {}
+
+    context = {
+        "exception_type": state["exception_type"],
+        "severity": state["severity"],
+        "description": state["description"],
+
+        "expected_value": state.get("expected_value"),
+        "actual_value": state.get("actual_value"),
+        "difference": state.get("difference"),
+
+        "transaction_amount": state.get(
+            "transaction_amount"
+        ),
+
+        "payment_amount": state.get(
+            "payment_amount"
+        ),
+
+        "settlement_amount": state.get(
+            "settlement_amount"
+        ),
+
+        "invoice_amount": state.get(
+            "invoice_amount"
+        ),
+
+        "recommendation": state.get(
+            "recommendation"
+        ),
+    }
+
+    service = LLMService()
+
+    result = service.analyze_exception(
+        context
+    )
+
+    return {
+        "agent_analysis": {
+            "analysis": result["analysis"],
+            "recommended_action": result[
+                "recommended_action"
+            ],
+            "confidence": result[
+                "confidence"
+            ],
+        },
+
+        "agent_recommendation": result[
+            "recommended_action"
+        ],
+
+        "agent_confidence": result[
+            "confidence"
+        ],
+    }
+
+
 
 def guardrail_node(
     state: FinanceAgentState,
 ) -> FinanceAgentState:
 
+    # Deterministic recommendation is authoritative.
     recommendation = state.get(
         "recommendation"
+    )
+
+    # LLM recommendation is advisory only.
+    llm_recommendation = state.get(
+        "agent_recommendation"
     )
 
     difference = abs(
@@ -186,18 +262,27 @@ def guardrail_node(
         or Decimal("0.00")
     )
 
+    # --------------------------------------------------
+    # AUTO-RESOLUTION GUARDRAILS
+    # --------------------------------------------------
+
     if recommendation == "AUTO_RESOLVE":
 
+        # Never automatically resolve a large
+        # financial discrepancy.
         if difference > AUTO_RESOLVE_LIMIT:
             return {
                 "guardrail_passed": False,
                 "guardrail_reason": (
                     "Auto-resolution blocked because "
-                    "difference exceeds safety threshold."
+                    "difference exceeds the safety threshold."
                 ),
             }
 
-        if state["exception_type"].startswith("MISSING_"):
+        # Missing records require investigation.
+        if state["exception_type"].startswith(
+            "MISSING_"
+        ):
             return {
                 "guardrail_passed": False,
                 "guardrail_reason": (
@@ -206,10 +291,17 @@ def guardrail_node(
                 ),
             }
 
+    # --------------------------------------------------
+    # FINAL GUARDRAIL RESULT
+    # --------------------------------------------------
+
     return {
         "guardrail_passed": True,
         "guardrail_reason": (
-            "Action satisfies current finance guardrails."
+            "Deterministic finance rules approved "
+            "the proposed action. "
+            f"LLM recommendation: "
+            f"{llm_recommendation or 'N/A'}."
         ),
     }
 

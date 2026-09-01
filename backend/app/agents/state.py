@@ -47,3 +47,7 @@ class FinanceAgentState(TypedDict, total=False):
 
     # Errors
     error: str | None
+
+    agent_analysis: str | None
+    agent_recommendation: str | None
+    agent_confidence: Decimal | None
