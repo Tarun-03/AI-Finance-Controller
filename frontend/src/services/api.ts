@@ -1,94 +1,160 @@
 import type {
-  ExceptionRecord,
+  FinanceException,
   HumanDecisionResponse,
   InvestigationResult,
+  Reconciliation,
+  ReconciliationRunResult,
+  Transaction,
 } from '../types/finance'
 
 const API_BASE = 'http://localhost:8000/api/v1'
 
 async function request<T>(
-  endpoint: string,
-  options?: RequestInit,
+  path: string,
+  options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`${API_BASE}${endpoint}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
     headers: {
       'Content-Type': 'application/json',
-      ...(options?.headers || {}),
+      ...(options.headers || {}),
     },
-    ...options,
   })
 
-  if (!response.ok) {
-    let message = `Request failed: ${response.status}`
+  const text = await response.text()
 
+  let data: unknown = null
+
+  if (text) {
     try {
-      const body = await response.json()
-      if (body.detail) {
-        message = body.detail
-      }
+      data = JSON.parse(text)
     } catch {
-      // Keep default error message.
+      data = text
     }
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof data === 'object' &&
+      data !== null &&
+      'detail' in data
+        ? String((data as { detail: unknown }).detail)
+        : `Request failed with status ${response.status}`
 
     throw new Error(message)
   }
 
-  return response.json()
+  return data as T
 }
 
-export async function getExceptions(): Promise<ExceptionRecord[]> {
-  return request<ExceptionRecord[]>('/exceptions')
+/* ---------------- HEALTH ---------------- */
+
+export async function healthCheck(): Promise<{ status: string }> {
+  const response = await fetch('http://localhost:8000/health')
+
+  if (!response.ok) {
+    throw new Error('Backend is offline')
+  }
+
+  return response.json() as Promise<{ status: string }>
 }
 
-export async function getException(
-  exceptionId: string,
-): Promise<ExceptionRecord> {
-  return request<ExceptionRecord>(`/exceptions/${exceptionId}`)
+/* ---------------- TRANSACTIONS ---------------- */
+
+export async function getTransactions(): Promise<Transaction[]> {
+  return request<Transaction[]>('/transactions')
 }
 
-export async function investigateException(
-  exceptionId: string,
-): Promise<InvestigationResult> {
-  return request<InvestigationResult>(
-    `/agent/exceptions/${exceptionId}/investigate`,
+export async function getTransaction(
+  transactionId: string,
+): Promise<Transaction> {
+  return request<Transaction>(
+    `/transactions/${encodeURIComponent(transactionId)}`,
+  )
+}
+
+/* ---------------- RECONCILIATIONS ---------------- */
+
+export async function getReconciliations(): Promise<Reconciliation[]> {
+  return request<Reconciliation[]>('/reconciliations')
+}
+
+export async function getReconciliation(
+  reconciliationId: string,
+): Promise<Reconciliation> {
+  return request<Reconciliation>(
+    `/reconciliations/${encodeURIComponent(reconciliationId)}`,
+  )
+}
+
+export async function runReconciliation(): Promise<ReconciliationRunResult> {
+  return request<ReconciliationRunResult>(
+    '/reconciliations/run',
     {
       method: 'POST',
     },
   )
 }
 
-export async function approveException(
+/* ---------------- EXCEPTIONS ---------------- */
+
+export async function getExceptions(): Promise<FinanceException[]> {
+  return request<FinanceException[]>('/exceptions')
+}
+
+export async function getOpenExceptions(): Promise<FinanceException[]> {
+  return request<FinanceException[]>('/exceptions/open')
+}
+
+export async function getException(
   exceptionId: string,
-  reason: string,
-): Promise<HumanDecisionResponse> {
-  return request<HumanDecisionResponse>(
-    `/exceptions/${exceptionId}/approve`,
+): Promise<FinanceException> {
+  return request<FinanceException>(
+    `/exceptions/${encodeURIComponent(exceptionId)}`,
+  )
+}
+
+/* ---------------- AI AGENT ---------------- */
+
+export async function investigateException(
+  exceptionId: string,
+): Promise<InvestigationResult> {
+  return request<InvestigationResult>(
+    `/agent/exceptions/${encodeURIComponent(exceptionId)}/investigate`,
     {
       method: 'POST',
-      body: JSON.stringify({ reason }),
+    },
+  )
+}
+
+/* ---------------- HUMAN REVIEW ---------------- */
+
+export async function approveException(
+  exceptionId: string,
+  reason?: string,
+): Promise<HumanDecisionResponse> {
+  return request<HumanDecisionResponse>(
+    `/exceptions/${encodeURIComponent(exceptionId)}/approve`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        reason: reason || null,
+      }),
     },
   )
 }
 
 export async function rejectException(
   exceptionId: string,
-  reason: string,
+  reason?: string,
 ): Promise<HumanDecisionResponse> {
   return request<HumanDecisionResponse>(
-    `/exceptions/${exceptionId}/reject`,
+    `/exceptions/${encodeURIComponent(exceptionId)}/reject`,
     {
       method: 'POST',
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({
+        reason: reason || null,
+      }),
     },
   )
-}
-
-export async function getHealth(): Promise<{ status: string }> {
-  return fetch('http://localhost:8000/health').then(async (response) => {
-    if (!response.ok) {
-      throw new Error('Backend unavailable')
-    }
-
-    return response.json()
-  })
 }

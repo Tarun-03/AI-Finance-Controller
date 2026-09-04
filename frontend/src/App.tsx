@@ -1,824 +1,1898 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const API = 'http://localhost:8000/api/v1'
+import {
+  approveException,
+  getExceptions,
+  getReconciliations,
+  getTransactions,
+  healthCheck,
+  investigateException,
+  rejectException,
+  runReconciliation,
+} from './services/api'
 
-type ExceptionStatus =
-  | 'OPEN'
-  | 'INVESTIGATING'
-  | 'RESOLVED'
-  | 'ESCALATED'
-  | 'REJECTED'
+import type {
+  FinanceException,
+  InvestigationResult,
+  Reconciliation,
+  Transaction,
+} from './types/finance'
 
-type ExceptionRecord = {
-  id: string
-  reconciliation_id: string
-  transaction_id: string
-  exception_type: string
-  severity: string
-  description: string
-  expected_value: string | null
-  actual_value: string | null
-  difference: string | null
-  status: ExceptionStatus
-  agent_decision: string | null
-  agent_confidence: string | null
-  assigned_to: string | null
-}
+type Page =
+  | 'dashboard'
+  | 'exceptions'
+  | 'transactions'
+  | 'reconciliations'
 
-type Investigation = {
-  exception_id: string
-  transaction_id?: string | null
-  transaction_reference?: string | null
-  exception_type?: string | null
-  severity?: string | null
-  expected_value?: string | null
-  actual_value?: string | null
-  difference?: string | null
-  risk_score?: string | null
-  recommendation?: string | null
-  reasoning?: string | null
-  agent_analysis?: {
-    analysis: string
-    recommended_action: string
-    confidence: string
-  } | null
-  guardrail_passed?: boolean | null
-  guardrail_reason?: string | null
-  requires_human_approval: boolean
-  final_action?: string | null
-  error?: string | null
-}
-
-type DecisionResponse = {
-  exception_id: string
-  status: string
-  decision: string
-  reason?: string | null
-}
-
-function money(value: string | null | undefined) {
-  if (value === null || value === undefined) return '—'
+function formatMoney(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === '') {
+    return '—'
+  }
 
   const number = Number(value)
 
-  if (Number.isNaN(number)) return value
+  if (Number.isNaN(number)) {
+    return String(value)
+  }
 
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
     currency: 'INR',
-    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(number)
 }
 
-function shortId(value: string) {
-  return `${value.slice(0, 8)}...`
+function formatDate(value: unknown): string {
+  if (!value) return '—'
+
+  const date = new Date(String(value))
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value)
+  }
+
+  return date.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  })
 }
 
-function normalizeType(value: string) {
-  return value
-    .replaceAll('_', ' ')
+function shortId(value: unknown): string {
+  const text = String(value ?? '')
+
+  if (!text) return '—'
+
+  if (text.length <= 12) return text
+
+  return `${text.slice(0, 8)}…${text.slice(-4)}`
+}
+
+function statusClass(value: unknown): string {
+  return String(value ?? 'UNKNOWN')
     .toLowerCase()
-    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .replaceAll('_', '-')
 }
 
-function statusLabel(value: string) {
-  return value.replaceAll('_', ' ')
+function getTransactionLabel(
+  transactionId: string | undefined,
+  transactions: Transaction[],
+): string {
+  if (!transactionId) return 'Unknown transaction'
+
+  const transaction = transactions.find(
+    (tx) => tx.transaction_id === transactionId,
+  )
+
+  if (!transaction) {
+    return shortId(transactionId)
+  }
+
+  return (
+    transaction.transaction_reference ||
+    transaction.transaction_id ||
+    shortId(transactionId)
+  )
 }
 
 function App() {
-  const [exceptions, setExceptions] = useState<ExceptionRecord[]>([])
-  const [selected, setSelected] = useState<ExceptionRecord | null>(null)
-  const [investigation, setInvestigation] =
-    useState<Investigation | null>(null)
+  const [page, setPage] = useState<Page>('dashboard')
 
-  const [filter, setFilter] = useState<'ALL' | ExceptionStatus>('ALL')
+  const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [reconciliations, setReconciliations] = useState<Reconciliation[]>([])
+  const [exceptions, setExceptions] = useState<FinanceException[]>([])
+
+  const [apiOnline, setApiOnline] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [runningReconciliation, setRunningReconciliation] = useState(false)
+
+  const [selectedException, setSelectedException] =
+    useState<FinanceException | null>(null)
+
+  const [investigation, setInvestigation] =
+    useState<InvestigationResult | null>(null)
+
   const [investigating, setInvestigating] = useState(false)
-  const [decisionLoading, setDecisionLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
+  const [reviewing, setReviewing] = useState(false)
 
-  async function loadExceptions(keepSelection = true) {
+  const [search, setSearch] = useState('')
+  const [severityFilter, setSeverityFilter] = useState('ALL')
+  const [statusFilter, setStatusFilter] = useState('ALL')
+
+  const [toast, setToast] = useState<{
+    type: 'success' | 'error'
+    message: string
+  } | null>(null)
+
+  useEffect(() => {
+    loadData()
+  }, [])
+
+  useEffect(() => {
+    if (!toast) return
+
+    const timer = window.setTimeout(() => {
+      setToast(null)
+    }, 3500)
+
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  async function loadData() {
+    setLoading(true)
+
     try {
-      setLoading(true)
-      setError(null)
+      const health = await healthCheck()
+      setApiOnline(health.status === 'healthy')
 
-      const response = await fetch(`${API}/exceptions`)
+      const [
+        transactionData,
+        reconciliationData,
+        exceptionData,
+      ] = await Promise.all([
+        getTransactions(),
+        getReconciliations(),
+        getExceptions(),
+      ])
 
-      if (!response.ok) {
-        throw new Error('Unable to load exceptions.')
-      }
+      setTransactions(transactionData)
+      setReconciliations(reconciliationData)
+      setExceptions(exceptionData)
+    } catch (error) {
+      setApiOnline(false)
 
-      const data: ExceptionRecord[] = await response.json()
-
-      setExceptions(data)
-
-      if (keepSelection && selected) {
-        const updated = data.find((item) => item.id === selected.id)
-        if (updated) setSelected(updated)
-      } else if (!selected && data.length > 0) {
-        setSelected(data[0])
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to load exceptions.',
-      )
+      setToast({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to connect to backend',
+      })
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => {
-    loadExceptions(false)
-  }, [])
-
-  const filteredExceptions = useMemo(() => {
-    if (filter === 'ALL') return exceptions
-
-    return exceptions.filter(
-      (exception) => exception.status === filter,
-    )
-  }, [exceptions, filter])
-
-  const counts = useMemo(() => {
-    return {
-      total: exceptions.length,
-      open: exceptions.filter((e) => e.status === 'OPEN').length,
-      investigating: exceptions.filter(
-        (e) => e.status === 'INVESTIGATING',
-      ).length,
-      resolved: exceptions.filter(
-        (e) => e.status === 'RESOLVED',
-      ).length,
-      escalated: exceptions.filter(
-        (e) => e.status === 'ESCALATED',
-      ).length,
-      rejected: exceptions.filter(
-        (e) => e.status === 'REJECTED',
-      ).length,
-    }
-  }, [exceptions])
-
-  function selectException(exception: ExceptionRecord) {
-    setSelected(exception)
-    setInvestigation(null)
-    setError(null)
-    setSuccess(null)
-  }
-
-  async function investigate() {
-    if (!selected) return
+  async function handleRunReconciliation() {
+    setRunningReconciliation(true)
 
     try {
-      setInvestigating(true)
-      setError(null)
-      setSuccess(null)
+      const result = await runReconciliation()
 
-      const response = await fetch(
-        `${API}/agent/exceptions/${selected.id}/investigate`,
-        {
-          method: 'POST',
-        },
-      )
+      setToast({
+        type: 'success',
+        message: `Reconciliation completed: ${
+          result.matched ?? 0
+        } matched, ${
+          result.mismatched ?? 0
+        } mismatched, ${
+          result.total_exceptions ?? 0
+        } exceptions.`,
+      })
 
-      const data = await response.json()
+      await loadData()
+    } catch (error) {
+      setToast({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Reconciliation failed',
+      })
+    } finally {
+      setRunningReconciliation(false)
+    }
+  }
 
-      if (!response.ok) {
-        throw new Error(
-          data.detail || data.error || 'Investigation failed.',
-        )
-      }
+  async function handleInvestigate(exception: FinanceException) {
+    setSelectedException(exception)
+    setInvestigation(null)
+    setInvestigating(true)
 
-      setInvestigation(data)
+    try {
+      const result = await investigateException(exception.id)
 
-      await loadExceptions()
+      setInvestigation(result)
 
-      setSuccess('AI investigation completed.')
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Investigation failed.',
-      )
+      await refreshExceptions()
+
+      setToast({
+        type: 'success',
+        message: 'AI investigation completed.',
+      })
+    } catch (error) {
+      setToast({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'AI investigation failed',
+      })
     } finally {
       setInvestigating(false)
     }
   }
 
-  async function makeDecision(
-    decision: 'approve' | 'reject',
-  ) {
-    if (!selected) return
+  async function refreshExceptions() {
+    const data = await getExceptions()
+    setExceptions(data)
 
-    const message =
-      decision === 'approve'
-        ? 'Reviewed the exception and approved the resolution.'
-        : 'Reviewed the exception and rejected the proposed resolution.'
-
-    try {
-      setDecisionLoading(true)
-      setError(null)
-      setSuccess(null)
-
-      const response = await fetch(
-        `${API}/exceptions/${selected.id}/${decision}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            reason: message,
-          }),
-        },
+    if (selectedException) {
+      const updated = data.find(
+        (item) => item.id === selectedException.id,
       )
 
-      const data: DecisionResponse = await response.json()
-
-      if (!response.ok) {
-        throw new Error(
-          (data as unknown as { detail?: string }).detail ||
-            'Unable to process decision.',
-        )
+      if (updated) {
+        setSelectedException(updated)
       }
-
-      setInvestigation(null)
-
-      await loadExceptions()
-
-      setSuccess(
-        decision === 'approve'
-          ? 'Exception approved and resolved.'
-          : 'Exception rejected.',
-      )
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to process decision.',
-      )
-    } finally {
-      setDecisionLoading(false)
     }
   }
 
-  const displayedInvestigation = investigation
+  async function handleApprove() {
+    if (!selectedException) return
+
+    setReviewing(true)
+
+    try {
+      const result = await approveException(
+        selectedException.id,
+        'Human reviewer approved the AI recommendation.',
+      )
+
+      setToast({
+        type: 'success',
+        message: `Exception ${shortId(
+          result.exception_id,
+        )} resolved successfully.`,
+      })
+
+      setSelectedException(null)
+      setInvestigation(null)
+
+      await refreshExceptions()
+    } catch (error) {
+      setToast({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Approval failed',
+      })
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  async function handleReject() {
+    if (!selectedException) return
+
+    setReviewing(true)
+
+    try {
+      const result = await rejectException(
+        selectedException.id,
+        'Human reviewer rejected the AI recommendation.',
+      )
+
+      setToast({
+        type: 'success',
+        message: `Exception ${shortId(
+          result.exception_id,
+        )} rejected.`,
+      })
+
+      setSelectedException(null)
+      setInvestigation(null)
+
+      await refreshExceptions()
+    } catch (error) {
+      setToast({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Rejection failed',
+      })
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  const stats = useMemo(() => {
+    const open = exceptions.filter(
+      (item) => item.status === 'OPEN',
+    ).length
+
+    const investigatingCount = exceptions.filter(
+      (item) => item.status === 'INVESTIGATING',
+    ).length
+
+    const resolved = exceptions.filter(
+      (item) => item.status === 'RESOLVED',
+    ).length
+
+    const rejected = exceptions.filter(
+      (item) => item.status === 'REJECTED',
+    ).length
+
+    const critical = exceptions.filter(
+      (item) => item.severity === 'CRITICAL',
+    ).length
+
+    const high = exceptions.filter(
+      (item) => item.severity === 'HIGH',
+    ).length
+
+    const mismatches = reconciliations.filter(
+      (item) =>
+        String(
+          item.status ??
+            item.reconciliation_status ??
+            '',
+        ).toUpperCase() === 'MISMATCH',
+    ).length
+
+    return {
+      open,
+      investigating: investigatingCount,
+      resolved,
+      rejected,
+      critical,
+      high,
+      mismatches,
+    }
+  }, [exceptions, reconciliations])
+
+  const filteredExceptions = useMemo(() => {
+    const query = search.trim().toLowerCase()
+
+    return exceptions.filter((exception) => {
+      const matchesSearch =
+        !query ||
+        exception.id.toLowerCase().includes(query) ||
+        exception.transaction_id
+          .toLowerCase()
+          .includes(query) ||
+        exception.exception_type
+          .toLowerCase()
+          .includes(query) ||
+        exception.description
+          .toLowerCase()
+          .includes(query)
+
+      const matchesSeverity =
+        severityFilter === 'ALL' ||
+        exception.severity === severityFilter
+
+      const matchesStatus =
+        statusFilter === 'ALL' ||
+        exception.status === statusFilter
+
+      return (
+        matchesSearch &&
+        matchesSeverity &&
+        matchesStatus
+      )
+    })
+  }, [
+    exceptions,
+    search,
+    severityFilter,
+    statusFilter,
+  ])
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark">◆</div>
+      <Sidebar
+        page={page}
+        setPage={setPage}
+        exceptionCount={stats.open}
+      />
 
-          <div>
-            <div className="brand-name">
-              AI Finance Controller
-            </div>
+      <main className="main-content">
+        <Header
+          apiOnline={apiOnline}
+          onRefresh={loadData}
+          loading={loading}
+        />
 
-            <div className="brand-subtitle">
-              Intelligent reconciliation & exception management
-            </div>
-          </div>
-        </div>
-
-        <div className="system-status">
-          <span />
-          System operational
-        </div>
-      </header>
-
-      <main className="dashboard">
-        <section className="page-heading">
-          <div>
-            <div className="eyebrow">FINANCE OPERATIONS</div>
-
-            <h1>Exception Control Center</h1>
-
-            <p>
-              Monitor reconciliation exceptions, review agent
-              decisions, and safely resolve financial discrepancies.
-            </p>
-          </div>
-
-          <button
-            className="refresh-button"
-            onClick={() => loadExceptions()}
-          >
-            ↻ Refresh
-          </button>
-        </section>
-
-        <section className="stats-grid">
-          <StatCard
-            label="Total Exceptions"
-            value={counts.total}
-            active={filter === 'ALL'}
-            onClick={() => setFilter('ALL')}
-          />
-
-          <StatCard
-            label="Open"
-            value={counts.open}
-            active={filter === 'OPEN'}
-            onClick={() => setFilter('OPEN')}
-          />
-
-          <StatCard
-            label="Investigating"
-            value={counts.investigating}
-            active={filter === 'INVESTIGATING'}
-            onClick={() => setFilter('INVESTIGATING')}
-          />
-
-          <StatCard
-            label="Resolved"
-            value={counts.resolved}
-            active={filter === 'RESOLVED'}
-            onClick={() => setFilter('RESOLVED')}
-          />
-
-          <StatCard
-            label="Escalated"
-            value={counts.escalated}
-            active={filter === 'ESCALATED'}
-            onClick={() => setFilter('ESCALATED')}
-          />
-
-          <StatCard
-            label="Rejected"
-            value={counts.rejected}
-            active={filter === 'REJECTED'}
-            onClick={() => setFilter('REJECTED')}
-          />
-        </section>
-
-        {error && (
-          <div className="alert error">
-            <strong>Error:</strong> {error}
+        {toast && (
+          <div className={`toast ${toast.type}`}>
+            <span className="toast-icon">
+              {toast.type === 'success' ? '✓' : '⚠'}
+            </span>
+            <span>{toast.message}</span>
           </div>
         )}
 
-        {success && (
-          <div className="alert success">
-            ✓ {success}
-          </div>
+        {page === 'dashboard' && (
+          <Dashboard
+            stats={stats}
+            transactions={transactions}
+            exceptions={exceptions}
+            reconciliations={reconciliations}
+            loading={loading}
+            runningReconciliation={
+              runningReconciliation
+            }
+            onRunReconciliation={
+              handleRunReconciliation
+            }
+            onNavigate={setPage}
+            onInvestigate={handleInvestigate}
+          />
         )}
 
-        <section className="workspace">
-          <div className="exception-list panel">
-            <div className="panel-heading">
-              <div>
-                <h2>Exceptions</h2>
-                <span>
-                  {filteredExceptions.length} exceptions shown
-                </span>
-              </div>
+        {page === 'exceptions' && (
+          <ExceptionsPage
+            exceptions={filteredExceptions}
+            search={search}
+            setSearch={setSearch}
+            severityFilter={severityFilter}
+            setSeverityFilter={setSeverityFilter}
+            statusFilter={statusFilter}
+            setStatusFilter={setStatusFilter}
+            onInvestigate={handleInvestigate}
+            selectedException={selectedException}
+            investigation={investigation}
+            investigating={investigating}
+            reviewing={reviewing}
+            onClose={() => {
+              setSelectedException(null)
+              setInvestigation(null)
+            }}
+            onApprove={handleApprove}
+            onReject={handleReject}
+          />
+        )}
 
-              <select
-                value={filter}
-                onChange={(event) =>
-                  setFilter(
-                    event.target.value as
-                      | 'ALL'
-                      | ExceptionStatus,
-                  )
-                }
-              >
-                <option value="ALL">All statuses</option>
-                <option value="OPEN">Open</option>
-                <option value="INVESTIGATING">
-                  Investigating
-                </option>
-                <option value="RESOLVED">Resolved</option>
-                <option value="ESCALATED">Escalated</option>
-                <option value="REJECTED">Rejected</option>
-              </select>
-            </div>
+        {page === 'transactions' && (
+          <TransactionsPage
+            transactions={transactions}
+            search={search}
+            setSearch={setSearch}
+          />
+        )}
 
-            <div className="table-header">
-              <span>EXCEPTION</span>
-              <span>TYPE</span>
-              <span>SEVERITY</span>
-              <span>DIFFERENCE</span>
-              <span>STATUS</span>
-              <span>AGENT</span>
-              <span />
-            </div>
-
-            {loading ? (
-              <div className="empty-state">
-                Loading exceptions...
-              </div>
-            ) : filteredExceptions.length === 0 ? (
-              <div className="empty-state">
-                No exceptions found.
-              </div>
-            ) : (
-              <div className="table-body">
-                {filteredExceptions.map((exception) => (
-                  <div
-                    className={`exception-row ${
-                      selected?.id === exception.id
-                        ? 'selected'
-                        : ''
-                    }`}
-                    key={exception.id}
-                  >
-                    <button
-                      className="row-main"
-                      onClick={() => selectException(exception)}
-                    >
-                      <div className="id-block">
-                        <strong>
-                          {shortId(exception.id)}
-                        </strong>
-                        <small>
-                          {shortId(exception.transaction_id)}
-                        </small>
-                      </div>
-
-                      <span>
-                        {normalizeType(exception.exception_type)}
-                      </span>
-
-                      <Severity
-                        value={exception.severity}
-                      />
-
-                      <span className="difference">
-                        {money(exception.difference)}
-                      </span>
-
-                      <Status value={exception.status} />
-
-                      <span className="agent">
-                        {exception.agent_decision
-                          ? statusLabel(
-                              exception.agent_decision,
-                            )
-                          : '—'}
-                      </span>
-
-                      <span className="view-label">
-                        View
-                      </span>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <aside className="details panel">
-            {!selected ? (
-              <div className="empty-details">
-                <div className="empty-icon">◈</div>
-                <h2>Select an exception</h2>
-                <p>
-                  Select an exception from the list to inspect
-                  its financial impact and agent decision.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="details-header">
-                  <div>
-                    <div className="eyebrow">
-                      EXCEPTION DETAILS
-                    </div>
-
-                    <h2>
-                      {normalizeType(
-                        selected.exception_type,
-                      )}
-                    </h2>
-
-                    <code>{selected.id}</code>
-                  </div>
-
-                  <Status value={selected.status} />
-                </div>
-
-                <div className="details-section">
-                  <div className="section-label">
-                    FINANCIAL IMPACT
-                  </div>
-
-                  <div className="financial-grid">
-                    <Metric
-                      label="Expected"
-                      value={money(
-                        selected.expected_value,
-                      )}
-                    />
-
-                    <Metric
-                      label="Actual"
-                      value={money(
-                        selected.actual_value,
-                      )}
-                    />
-
-                    <Metric
-                      label="Difference"
-                      value={money(
-                        selected.difference,
-                      )}
-                      danger
-                    />
-                  </div>
-                </div>
-
-                <div className="details-section">
-                  <div className="section-label">
-                    EXCEPTION
-                  </div>
-
-                  <p className="description">
-                    {selected.description}
-                  </p>
-
-                  <div className="info-grid">
-                    <Info
-                      label="Severity"
-                      value={selected.severity}
-                    />
-
-                    <Info
-                      label="Transaction"
-                      value={shortId(
-                        selected.transaction_id,
-                      )}
-                      mono
-                    />
-
-                    <Info
-                      label="Reconciliation"
-                      value={shortId(
-                        selected.reconciliation_id,
-                      )}
-                      mono
-                    />
-                  </div>
-                </div>
-
-                {displayedInvestigation && (
-                  <div className="ai-result">
-                    <div className="ai-heading">
-                      <div>
-                        <div className="section-label">
-                          AI INVESTIGATION
-                        </div>
-                        <h3>Agent Assessment</h3>
-                      </div>
-
-                      <div className="ai-badge">
-                        AI
-                      </div>
-                    </div>
-
-                    <div className="ai-metrics">
-                      <Metric
-                        label="Risk Score"
-                        value={
-                          displayedInvestigation.risk_score
-                            ? Number(
-                                displayedInvestigation.risk_score,
-                              ).toFixed(2)
-                            : '—'
-                        }
-                      />
-
-                      <Metric
-                        label="Confidence"
-                        value={
-                          displayedInvestigation
-                            .agent_analysis?.confidence
-                            ? Number(
-                                displayedInvestigation
-                                  .agent_analysis.confidence,
-                              ).toFixed(2)
-                            : selected.agent_confidence
-                              ? Number(
-                                  selected.agent_confidence,
-                                ).toFixed(2)
-                              : '—'
-                        }
-                      />
-
-                      <Metric
-                        label="Recommendation"
-                        value={
-                          displayedInvestigation.recommendation
-                            ? statusLabel(
-                                displayedInvestigation.recommendation,
-                              )
-                            : '—'
-                        }
-                      />
-                    </div>
-
-                    <div className="reasoning">
-                      <div className="section-label">
-                        REASONING
-                      </div>
-
-                      <p>
-                        {displayedInvestigation.reasoning ||
-                          displayedInvestigation.agent_analysis
-                            ?.analysis ||
-                          'No reasoning provided.'}
-                      </p>
-                    </div>
-
-                    <div className="guardrail">
-                      <div
-                        className={
-                          displayedInvestigation.guardrail_passed
-                            ? 'guardrail-icon passed'
-                            : 'guardrail-icon failed'
-                        }
-                      >
-                        {displayedInvestigation.guardrail_passed
-                          ? '✓'
-                          : '!'}
-                      </div>
-
-                      <div>
-                        <strong>
-                          Guardrail{' '}
-                          {displayedInvestigation.guardrail_passed
-                            ? 'passed'
-                            : 'failed'}
-                        </strong>
-
-                        <p>
-                          {displayedInvestigation.guardrail_reason ||
-                            'No guardrail explanation provided.'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="action-area">
-                  {selected.status === 'OPEN' && (
-                    <button
-                      className="primary-action"
-                      onClick={investigate}
-                      disabled={investigating}
-                    >
-                      {investigating
-                        ? 'Investigating...'
-                        : '✦ Investigate with AI'}
-                    </button>
-                  )}
-
-                  {selected.status === 'INVESTIGATING' && (
-                    <div className="decision-actions">
-                      <button
-                        className="approve-button"
-                        onClick={() =>
-                          makeDecision('approve')
-                        }
-                        disabled={decisionLoading}
-                      >
-                        {decisionLoading
-                          ? 'Processing...'
-                          : '✓ Approve Resolution'}
-                      </button>
-
-                      <button
-                        className="reject-button"
-                        onClick={() =>
-                          makeDecision('reject')
-                        }
-                        disabled={decisionLoading}
-                      >
-                        Reject
-                      </button>
-                    </div>
-                  )}
-
-                  {selected.status === 'RESOLVED' && (
-                    <div className="final-state resolved-state">
-                      <strong>✓ Exception resolved</strong>
-                      <span>
-                        This exception has been successfully
-                        resolved.
-                      </span>
-                    </div>
-                  )}
-
-                  {selected.status === 'ESCALATED' && (
-                    <div className="final-state escalated-state">
-                      <strong>⚠ Exception escalated</strong>
-                      <span>
-                        This exception requires additional
-                        investigation or financial evidence.
-                      </span>
-                    </div>
-                  )}
-
-                  {selected.status === 'REJECTED' && (
-                    <div className="final-state rejected-state">
-                      <strong>Exception rejected</strong>
-                      <span>
-                        The proposed resolution was rejected.
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </aside>
-        </section>
+        {page === 'reconciliations' && (
+          <ReconciliationsPage
+            reconciliations={reconciliations}
+            transactions={transactions}
+          />
+        )}
       </main>
     </div>
   )
 }
 
-function StatCard({
+/* =====================================================
+   SIDEBAR
+===================================================== */
+
+function Sidebar({
+  page,
+  setPage,
+  exceptionCount,
+}: {
+  page: Page
+  setPage: (page: Page) => void
+  exceptionCount: number
+}) {
+  return (
+    <aside className="sidebar">
+      <div className="brand">
+        <div className="brand-mark">
+          <span>₿</span>
+        </div>
+
+        <div>
+          <div className="brand-name">
+            Finance<span>AI</span>
+          </div>
+          <div className="brand-subtitle">
+            CONTROLLER
+          </div>
+        </div>
+      </div>
+
+      <div className="nav-section">
+        <div className="nav-label">WORKSPACE</div>
+
+        <NavItem
+          icon="⌂"
+          label="Dashboard"
+          active={page === 'dashboard'}
+          onClick={() => setPage('dashboard')}
+        />
+
+        <NavItem
+          icon="⚠"
+          label="Exceptions"
+          active={page === 'exceptions'}
+          badge={exceptionCount}
+          onClick={() => setPage('exceptions')}
+        />
+
+        <NavItem
+          icon="↔"
+          label="Transactions"
+          active={page === 'transactions'}
+          onClick={() => setPage('transactions')}
+        />
+
+        <NavItem
+          icon="◎"
+          label="Reconciliations"
+          active={page === 'reconciliations'}
+          onClick={() => setPage('reconciliations')}
+        />
+      </div>
+
+      <div className="sidebar-bottom">
+        <div className="agent-card">
+          <div className="agent-avatar">AI</div>
+
+          <div>
+            <strong>Finance Agent</strong>
+            <span>Agentic workflow active</span>
+          </div>
+
+          <div className="online-dot" />
+        </div>
+
+        <div className="version">
+          AI Finance Controller v0.1
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function NavItem({
+  icon,
   label,
-  value,
   active,
+  badge,
   onClick,
 }: {
+  icon: string
   label: string
-  value: number
   active: boolean
+  badge?: number
   onClick: () => void
 }) {
   return (
     <button
-      className={`stat-card ${active ? 'active' : ''}`}
+      className={`nav-item ${active ? 'active' : ''}`}
       onClick={onClick}
     >
+      <span className="nav-icon">{icon}</span>
       <span>{label}</span>
-      <strong>{value}</strong>
+
+      {badge !== undefined && badge > 0 && (
+        <span className="nav-badge">{badge}</span>
+      )}
     </button>
   )
 }
 
-function Metric({
+/* =====================================================
+   HEADER
+===================================================== */
+
+function Header({
+  apiOnline,
+  onRefresh,
+  loading,
+}: {
+  apiOnline: boolean
+  onRefresh: () => void
+  loading: boolean
+}) {
+  return (
+    <header className="topbar">
+      <div>
+        <div className="breadcrumb">
+          Finance Operations / Overview
+        </div>
+
+        <h1>AI Finance Controller</h1>
+
+        <p className="header-description">
+          Autonomous reconciliation, exception
+          investigation and human-in-the-loop controls.
+        </p>
+      </div>
+
+      <div className="topbar-actions">
+        <div
+          className={`api-status ${
+            apiOnline ? 'online' : 'offline'
+          }`}
+        >
+          <span className="status-dot" />
+          {apiOnline ? 'API Online' : 'API Offline'}
+        </div>
+
+        <button
+          className="icon-button"
+          onClick={onRefresh}
+          disabled={loading}
+          title="Refresh data"
+        >
+          ↻
+        </button>
+
+        <div className="user-avatar">F</div>
+      </div>
+    </header>
+  )
+}
+
+/* =====================================================
+   DASHBOARD
+===================================================== */
+
+function Dashboard({
+  stats,
+  transactions,
+  exceptions,
+  reconciliations,
+  loading,
+  runningReconciliation,
+  onRunReconciliation,
+  onNavigate,
+  onInvestigate,
+}: {
+  stats: {
+    open: number
+    investigating: number
+    resolved: number
+    rejected: number
+    critical: number
+    high: number
+    mismatches: number
+  }
+  transactions: Transaction[]
+  exceptions: FinanceException[]
+  reconciliations: Reconciliation[]
+  loading: boolean
+  runningReconciliation: boolean
+  onRunReconciliation: () => void
+  onNavigate: (page: Page) => void
+  onInvestigate: (exception: FinanceException) => void
+}) {
+  if (loading) {
+    return <LoadingState />
+  }
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div>
+          <h2>Operations overview</h2>
+          <p>
+            Monitor reconciliation health and resolve
+            financial exceptions.
+          </p>
+        </div>
+
+        <button
+          className="primary-button"
+          onClick={onRunReconciliation}
+          disabled={runningReconciliation}
+        >
+          {runningReconciliation ? (
+            <>
+              <span className="spinner" />
+              Running...
+            </>
+          ) : (
+            <>
+              <span>▶</span>
+              Run reconciliation
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="metric-grid">
+        <MetricCard
+          label="Total transactions"
+          value={transactions.length}
+          icon="↔"
+          detail="Loaded from finance system"
+        />
+
+        <MetricCard
+          label="Open exceptions"
+          value={stats.open}
+          icon="⚠"
+          tone={stats.open > 0 ? 'warning' : 'normal'}
+          detail={
+            stats.critical > 0
+              ? `${stats.critical} critical`
+              : 'No critical exceptions'
+          }
+        />
+
+        <MetricCard
+          label="Investigating"
+          value={stats.investigating}
+          icon="◌"
+          tone="info"
+          detail="AI / human review"
+        />
+
+        <MetricCard
+          label="Resolved"
+          value={stats.resolved}
+          icon="✓"
+          tone="success"
+          detail="Exceptions closed"
+        />
+      </div>
+
+      <div className="dashboard-grid">
+        <section className="panel exception-panel">
+          <div className="panel-header">
+            <div>
+              <h3>Priority exceptions</h3>
+              <p>
+                Highest-risk items requiring attention
+              </p>
+            </div>
+
+            <button
+              className="text-button"
+              onClick={() =>
+                onNavigate('exceptions')
+              }
+            >
+              View all →
+            </button>
+          </div>
+
+          {exceptions.length === 0 ? (
+            <EmptyState
+              title="No exceptions"
+              text="Your reconciliation queue is clean."
+            />
+          ) : (
+            <div className="exception-list">
+              {exceptions
+                .filter(
+                  (item) =>
+                    item.status === 'OPEN' ||
+                    item.status === 'INVESTIGATING',
+                )
+                .sort(
+                  (a, b) =>
+                    severityWeight(b.severity) -
+                    severityWeight(a.severity),
+                )
+                .slice(0, 6)
+                .map((exception) => (
+                  <ExceptionRow
+                    key={exception.id}
+                    exception={exception}
+                    onClick={() =>
+                      onInvestigate(exception)
+                    }
+                  />
+                ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>System health</h3>
+              <p>Current finance control posture</p>
+            </div>
+          </div>
+
+          <div className="health-list">
+            <HealthRow
+              label="Reconciliation engine"
+              status="Operational"
+            />
+
+            <HealthRow
+              label="AI investigation agent"
+              status="Operational"
+            />
+
+            <HealthRow
+              label="Exception workflow"
+              status={
+                stats.open > 0
+                  ? `${stats.open} open`
+                  : 'Clear'
+              }
+              warning={stats.open > 0}
+            />
+
+            <HealthRow
+              label="High-risk exceptions"
+              status={String(stats.high)}
+              warning={stats.high > 0}
+            />
+          </div>
+
+          <div className="health-summary">
+            <div className="health-circle">
+              <strong>
+                {exceptions.length === 0
+                  ? 100
+                  : Math.max(
+                      0,
+                      Math.round(
+                        ((stats.resolved +
+                          stats.rejected) /
+                          exceptions.length) *
+                          100,
+                      ),
+                    )}
+                %
+              </strong>
+              <span>closed</span>
+            </div>
+
+            <div>
+              <strong>Exception resolution</strong>
+              <p>
+                Automated detection with human approval
+                controls.
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h3>Recent reconciliations</h3>
+            <p>
+              Latest transaction matching activity
+            </p>
+          </div>
+
+          <button
+            className="text-button"
+            onClick={() =>
+              onNavigate('reconciliations')
+            }
+          >
+            Open reconciliations →
+          </button>
+        </div>
+
+        <ReconciliationTable
+          reconciliations={reconciliations.slice(0, 6)}
+          transactions={transactions}
+        />
+      </section>
+    </div>
+  )
+}
+
+function MetricCard({
+  label,
+  value,
+  icon,
+  detail,
+  tone = 'normal',
+}: {
+  label: string
+  value: string | number
+  icon: string
+  detail: string
+  tone?: 'normal' | 'warning' | 'success' | 'info'
+}) {
+  return (
+    <div className={`metric-card ${tone}`}>
+      <div className="metric-top">
+        <span>{label}</span>
+        <div className="metric-icon">{icon}</div>
+      </div>
+
+      <strong>{value}</strong>
+
+      <small>{detail}</small>
+    </div>
+  )
+}
+
+/* =====================================================
+   EXCEPTIONS
+===================================================== */
+
+function ExceptionsPage({
+  exceptions,
+  search,
+  setSearch,
+  severityFilter,
+  setSeverityFilter,
+  statusFilter,
+  setStatusFilter,
+  onInvestigate,
+  selectedException,
+  investigation,
+  investigating,
+  reviewing,
+  onClose,
+  onApprove,
+  onReject,
+}: {
+  exceptions: FinanceException[]
+  search: string
+  setSearch: (value: string) => void
+  severityFilter: string
+  setSeverityFilter: (value: string) => void
+  statusFilter: string
+  setStatusFilter: (value: string) => void
+  onInvestigate: (exception: FinanceException) => void
+  selectedException: FinanceException | null
+  investigation: InvestigationResult | null
+  investigating: boolean
+  reviewing: boolean
+  onClose: () => void
+  onApprove: () => void
+  onReject: () => void
+}) {
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div>
+          <h2>Exception management</h2>
+          <p>
+            Review discrepancies detected during
+            reconciliation.
+          </p>
+        </div>
+
+        <div className="queue-summary">
+          <span>{exceptions.length}</span>
+          results
+        </div>
+      </div>
+
+      <div className="filter-bar">
+        <div className="search-box">
+          <span>⌕</span>
+          <input
+            value={search}
+            onChange={(event) =>
+              setSearch(event.target.value)
+            }
+            placeholder="Search exceptions..."
+          />
+        </div>
+
+        <select
+          value={severityFilter}
+          onChange={(event) =>
+            setSeverityFilter(event.target.value)
+          }
+        >
+          <option value="ALL">All severities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="HIGH">High</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="LOW">Low</option>
+        </select>
+
+        <select
+          value={statusFilter}
+          onChange={(event) =>
+            setStatusFilter(event.target.value)
+          }
+        >
+          <option value="ALL">All statuses</option>
+          <option value="OPEN">Open</option>
+          <option value="INVESTIGATING">
+            Investigating
+          </option>
+          <option value="RESOLVED">Resolved</option>
+          <option value="ESCALATED">Escalated</option>
+          <option value="REJECTED">Rejected</option>
+        </select>
+      </div>
+
+      <div
+        className={`exceptions-layout ${
+          selectedException ? 'with-detail' : ''
+        }`}
+      >
+        <section className="panel table-panel">
+          {exceptions.length === 0 ? (
+            <EmptyState
+              title="No exceptions found"
+              text="Try changing your filters."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Exception</th>
+                    <th>Type</th>
+                    <th>Severity</th>
+                    <th>Difference</th>
+                    <th>Status</th>
+                    <th />
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {exceptions.map((exception) => (
+                    <tr
+                      key={exception.id}
+                      className={
+                        selectedException?.id ===
+                        exception.id
+                          ? 'selected-row'
+                          : ''
+                      }
+                      onClick={() =>
+                        onInvestigate(exception)
+                      }
+                    >
+                      <td>
+                        <div className="primary-cell">
+                          <strong>
+                            {shortId(exception.id)}
+                          </strong>
+                          <span>
+                            TX{' '}
+                            {shortId(
+                              exception.transaction_id,
+                            )}
+                          </span>
+                        </div>
+                      </td>
+
+                      <td>
+                        <span className="type-label">
+                          {exception.exception_type.replaceAll(
+                            '_',
+                            ' ',
+                          )}
+                        </span>
+                      </td>
+
+                      <td>
+                        <StatusBadge
+                          value={exception.severity}
+                          type="severity"
+                        />
+                      </td>
+
+                      <td className="amount danger-text">
+                        {formatMoney(
+                          exception.difference,
+                        )}
+                      </td>
+
+                      <td>
+                        <StatusBadge
+                          value={exception.status}
+                          type="status"
+                        />
+                      </td>
+
+                      <td>
+                        <button
+                          className="row-action"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onInvestigate(exception)
+                          }}
+                        >
+                          Investigate
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {selectedException && (
+          <ExceptionDetail
+            exception={selectedException}
+            investigation={investigation}
+            investigating={investigating}
+            reviewing={reviewing}
+            onClose={onClose}
+            onApprove={onApprove}
+            onReject={onReject}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ExceptionRow({
+  exception,
+  onClick,
+}: {
+  exception: FinanceException
+  onClick: () => void
+}) {
+  return (
+    <button className="exception-row" onClick={onClick}>
+      <div
+        className={`severity-bar ${statusClass(
+          exception.severity,
+        )}`}
+      />
+
+      <div className="exception-main">
+        <div className="exception-title">
+          {exception.exception_type.replaceAll(
+            '_',
+            ' ',
+          )}
+        </div>
+
+        <div className="exception-description">
+          {exception.description}
+        </div>
+
+        <div className="exception-meta">
+          <span>
+            TX {shortId(exception.transaction_id)}
+          </span>
+          <span>
+            {formatMoney(exception.difference)}
+          </span>
+        </div>
+      </div>
+
+      <div className="exception-right">
+        <StatusBadge
+          value={exception.severity}
+          type="severity"
+        />
+        <span className="arrow">→</span>
+      </div>
+    </button>
+  )
+}
+
+/* =====================================================
+   EXCEPTION DETAIL
+===================================================== */
+
+function ExceptionDetail({
+  exception,
+  investigation,
+  investigating,
+  reviewing,
+  onClose,
+  onApprove,
+  onReject,
+}: {
+  exception: FinanceException
+  investigation: InvestigationResult | null
+  investigating: boolean
+  reviewing: boolean
+  onClose: () => void
+  onApprove: () => void
+  onReject: () => void
+}) {
+  return (
+    <aside className="exception-detail">
+      <div className="detail-header">
+        <div>
+          <span className="eyebrow">
+            EXCEPTION DETAILS
+          </span>
+
+          <h3>{exception.exception_type.replaceAll(
+            '_',
+            ' ',
+          )}</h3>
+
+          <span className="detail-id">
+            {exception.id}
+          </span>
+        </div>
+
+        <button
+          className="close-button"
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="detail-status-row">
+        <StatusBadge
+          value={exception.severity}
+          type="severity"
+        />
+
+        <StatusBadge
+          value={exception.status}
+          type="status"
+        />
+      </div>
+
+      <div className="detail-section">
+        <h4>Issue</h4>
+        <p className="detail-description">
+          {exception.description}
+        </p>
+      </div>
+
+      <div className="value-grid">
+        <ValueBox
+          label="Expected"
+          value={formatMoney(
+            exception.expected_value,
+          )}
+        />
+
+        <ValueBox
+          label="Actual"
+          value={formatMoney(exception.actual_value)}
+        />
+
+        <ValueBox
+          label="Difference"
+          value={formatMoney(exception.difference)}
+          danger
+        />
+      </div>
+
+      <div className="detail-section">
+        <h4>Transaction</h4>
+
+        <div className="info-list">
+          <InfoLine
+            label="Transaction ID"
+            value={exception.transaction_id}
+          />
+
+          <InfoLine
+            label="Reconciliation ID"
+            value={exception.reconciliation_id}
+          />
+
+          <InfoLine
+            label="Assigned to"
+            value={exception.assigned_to || 'Unassigned'}
+          />
+        </div>
+      </div>
+
+      <div className="ai-section">
+        <div className="ai-heading">
+          <div className="ai-logo">✦</div>
+
+          <div>
+            <h4>AI investigation</h4>
+            <span>Finance Agent</span>
+          </div>
+        </div>
+
+        {!investigation && !investigating && (
+          <div className="ai-empty">
+            <div className="ai-empty-icon">
+              ✦
+            </div>
+
+            <strong>
+              Ready to investigate
+            </strong>
+
+            <p>
+              The AI agent will analyze the exception,
+              determine risk, recommend an action and
+              apply guardrails.
+            </p>
+
+            <button
+              className="ai-button"
+              onClick={() => {
+                // Detail is already opened by investigation.
+              }}
+              disabled
+            >
+              Investigation available
+            </button>
+          </div>
+        )}
+
+        {investigating && (
+          <div className="ai-loading">
+            <div className="agent-pulse">✦</div>
+
+            <strong>
+              Agent investigating...
+            </strong>
+
+            <p>
+              Analyzing transaction context, mismatch
+              evidence and financial risk.
+            </p>
+
+            <div className="loading-lines">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        )}
+
+        {investigation && !investigating && (
+          <div className="investigation-result">
+            {investigation.agent_analysis && (
+              <div className="analysis-block">
+                <div className="analysis-label">
+                  AGENT ANALYSIS
+                </div>
+
+                <p>
+                  {investigation.agent_analysis.analysis}
+                </p>
+              </div>
+            )}
+
+            {investigation.reasoning && (
+              <div className="analysis-block">
+                <div className="analysis-label">
+                  REASONING
+                </div>
+
+                <p>{investigation.reasoning}</p>
+              </div>
+            )}
+
+            <div className="recommendation-box">
+              <span>RECOMMENDED ACTION</span>
+
+              <strong>
+                {investigation.recommendation ||
+                  investigation.agent_analysis
+                    ?.recommended_action ||
+                  'Review manually'}
+              </strong>
+            </div>
+
+            <div className="ai-metrics">
+              <div>
+                <span>Confidence</span>
+                <strong>
+                  {formatPercent(
+                    investigation.agent_analysis
+                      ?.confidence,
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>Risk score</span>
+                <strong>
+                  {formatPercent(
+                    investigation.risk_score,
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>Guardrail</span>
+                <strong
+                  className={
+                    investigation.guardrail_passed
+                      ? 'positive'
+                      : 'negative'
+                  }
+                >
+                  {investigation.guardrail_passed
+                    ? 'PASSED'
+                    : 'REVIEW'}
+                </strong>
+              </div>
+            </div>
+
+            {investigation.guardrail_reason && (
+              <div className="guardrail-note">
+                <span>▣</span>
+                {investigation.guardrail_reason}
+              </div>
+            )}
+
+            {investigation.requires_human_approval && (
+              <div className="human-review">
+                <div>
+                  <strong>
+                    Human approval required
+                  </strong>
+
+                  <p>
+                    This action cannot be finalized
+                    automatically.
+                  </p>
+                </div>
+
+                <div className="review-actions">
+                  <button
+                    className="reject-button"
+                    onClick={onReject}
+                    disabled={reviewing}
+                  >
+                    {reviewing
+                      ? 'Processing...'
+                      : 'Reject'}
+                  </button>
+
+                  <button
+                    className="approve-button"
+                    onClick={onApprove}
+                    disabled={reviewing}
+                  >
+                    {reviewing
+                      ? 'Processing...'
+                      : 'Approve'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </aside>
+  )
+}
+
+function formatPercent(
+  value: string | number | null | undefined,
+): string {
+  if (value === null || value === undefined) {
+    return '—'
+  }
+
+  const number = Number(value)
+
+  if (Number.isNaN(number)) {
+    return String(value)
+  }
+
+  return `${Math.round(number * 100)}%`
+}
+
+/* =====================================================
+   TRANSACTIONS
+===================================================== */
+
+function TransactionsPage({
+  transactions,
+  search,
+  setSearch,
+}: {
+  transactions: Transaction[]
+  search: string
+  setSearch: (value: string) => void
+}) {
+  const filtered = transactions.filter((tx) => {
+    const query = search.toLowerCase()
+
+    if (!query) return true
+
+    return (
+      tx.transaction_id
+        .toLowerCase()
+        .includes(query) ||
+      String(tx.merchant_id ?? '')
+        .toLowerCase()
+        .includes(query) ||
+      String(tx.customer_id ?? '')
+        .toLowerCase()
+        .includes(query) ||
+      String(tx.status ?? '')
+        .toLowerCase()
+        .includes(query)
+    )
+  })
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div>
+          <h2>Transactions</h2>
+          <p>
+            Source transactions used by the
+            reconciliation engine.
+          </p>
+        </div>
+
+        <div className="queue-summary">
+          <span>{transactions.length}</span>
+          transactions
+        </div>
+      </div>
+
+      <div className="filter-bar">
+        <div className="search-box wide">
+          <span>⌕</span>
+
+          <input
+            value={search}
+            onChange={(event) =>
+              setSearch(event.target.value)
+            }
+            placeholder="Search transaction, merchant, customer..."
+          />
+        </div>
+      </div>
+
+      <section className="panel table-panel">
+        {filtered.length === 0 ? (
+          <EmptyState
+            title="No transactions found"
+            text="Try a different search."
+          />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Transaction</th>
+                  <th>Merchant</th>
+                  <th>Customer</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {filtered.map((tx) => (
+                  <tr key={tx.transaction_id}>
+                    <td>
+                      <code>
+                        {shortId(tx.transaction_id)}
+                      </code>
+                    </td>
+
+                    <td>
+                      {String(tx.merchant_id ?? '—')}
+                    </td>
+
+                    <td>
+                      {String(tx.customer_id ?? '—')}
+                    </td>
+
+                    <td className="amount">
+                      {formatMoney(tx.amount)}
+                    </td>
+
+                    <td>
+                      <StatusBadge
+                        value={String(
+                          tx.status ?? 'UNKNOWN',
+                        )}
+                        type="status"
+                      />
+                    </td>
+
+                    <td>
+                      {formatDate(
+                        tx.transaction_date,
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+/* =====================================================
+   RECONCILIATIONS
+===================================================== */
+
+function ReconciliationsPage({
+  reconciliations,
+  transactions,
+}: {
+  reconciliations: Reconciliation[]
+  transactions: Transaction[]
+}) {
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div>
+          <h2>Reconciliations</h2>
+          <p>
+            Compare payment, settlement and invoice
+            records.
+          </p>
+        </div>
+
+        <div className="queue-summary">
+          <span>{reconciliations.length}</span>
+          records
+        </div>
+      </div>
+
+      <section className="panel table-panel">
+        <ReconciliationTable
+          reconciliations={reconciliations}
+          transactions={transactions}
+        />
+      </section>
+    </div>
+  )
+}
+
+function ReconciliationTable({
+  reconciliations,
+  transactions,
+}: {
+  reconciliations: Reconciliation[]
+  transactions: Transaction[]
+}) {
+  if (reconciliations.length === 0) {
+    return (
+      <EmptyState
+        title="No reconciliation records"
+        text="Run reconciliation to generate results."
+      />
+    )
+  }
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Transaction</th>
+            <th>Payment</th>
+            <th>Settlement</th>
+            <th>Invoice</th>
+            <th>Difference</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {reconciliations.map((record, index) => {
+            const transactionId =
+              typeof record.transaction_id === 'string'
+                ? record.transaction_id
+                : undefined
+
+            const status =
+              record.status ??
+              record.reconciliation_status ??
+              'UNKNOWN'
+
+            return (
+              <tr
+                key={
+                  record.id ||
+                  record.reconciliation_id ||
+                  `${transactionId}-${index}`
+                }
+              >
+                <td>
+                  <div className="primary-cell">
+                    <strong>
+                      {getTransactionLabel(
+                        transactionId,
+                        transactions,
+                      )}
+                    </strong>
+
+                    <span>
+                      {shortId(transactionId)}
+                    </span>
+                  </div>
+                </td>
+
+                <td>
+                  {formatMoney(record.payment_amount)}
+                </td>
+
+                <td>
+                  {formatMoney(
+                    record.settlement_amount,
+                  )}
+                </td>
+
+                <td>
+                  {formatMoney(record.invoice_amount)}
+                </td>
+
+                <td
+                  className={
+                    Number(
+                      record.difference_amount,
+                    ) !== 0
+                      ? 'danger-text'
+                      : ''
+                  }
+                >
+                  {formatMoney(
+                    record.difference_amount,
+                  )}
+                </td>
+
+                <td>
+                  <StatusBadge
+                    value={String(status)}
+                    type="status"
+                  />
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/* =====================================================
+   SMALL COMPONENTS
+===================================================== */
+
+function StatusBadge({
+  value,
+  type,
+}: {
+  value: string
+  type: 'status' | 'severity'
+}) {
+  const label = value.replaceAll('_', ' ')
+
+  return (
+    <span
+      className={`status-badge ${type} ${statusClass(
+        value,
+      )}`}
+    >
+      <span className="badge-dot" />
+      {label}
+    </span>
+  )
+}
+
+function ValueBox({
   label,
   value,
   danger = false,
 }: {
   label: string
-  value: string
+  value: string | null
   danger?: boolean
 }) {
   return (
-    <div className="metric">
+    <div className={`value-box ${danger ? 'danger' : ''}`}>
       <span>{label}</span>
-      <strong className={danger ? 'danger' : ''}>
-        {value}
-      </strong>
+      <strong>{value ?? '—'}</strong>
     </div>
   )
 }
 
-function Info({
+function InfoLine({
   label,
   value,
-  mono = false,
 }: {
   label: string
   value: string
-  mono?: boolean
 }) {
   return (
-    <div className="info-item">
+    <div className="info-line">
       <span>{label}</span>
-      <strong className={mono ? 'mono' : ''}>
-        {value}
-      </strong>
+      <code>{shortId(value)}</code>
     </div>
   )
 }
 
-function Severity({ value }: { value: string }) {
+function HealthRow({
+  label,
+  status,
+  warning = false,
+}: {
+  label: string
+  status: string
+  warning?: boolean
+}) {
   return (
-    <span
-      className={`severity severity-${value.toLowerCase()}`}
-    >
-      {value}
-    </span>
+    <div className="health-row">
+      <div className="health-label">
+        <span
+          className={`health-dot ${
+            warning ? 'warning' : ''
+          }`}
+        />
+        {label}
+      </div>
+
+      <strong>{status}</strong>
+    </div>
   )
 }
 
-function Status({ value }: { value: string }) {
+function LoadingState() {
   return (
-    <span
-      className={`status status-${value.toLowerCase()}`}
-    >
-      {statusLabel(value)}
-    </span>
+    <div className="loading-state">
+      <div className="big-spinner" />
+      <h3>Loading finance data</h3>
+      <p>
+        Connecting to the reconciliation platform...
+      </p>
+    </div>
   )
+}
+
+function EmptyState({
+  title,
+  text,
+}: {
+  title: string
+  text: string
+}) {
+  return (
+    <div className="empty-state">
+      <div className="empty-icon">✓</div>
+      <strong>{title}</strong>
+      <p>{text}</p>
+    </div>
+  )
+}
+
+function severityWeight(
+  severity: string,
+): number {
+  switch (severity) {
+    case 'CRITICAL':
+      return 4
+    case 'HIGH':
+      return 3
+    case 'MEDIUM':
+      return 2
+    case 'LOW':
+      return 1
+    default:
+      return 0
+  }
 }
 
 export default App

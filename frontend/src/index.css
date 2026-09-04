@@ -8,8 +8,8 @@
     "Segoe UI",
     sans-serif;
 
-  color: #dce5f2;
-  background: #070b12;
+  color: #111827;
+  background: #f5f7fa;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -26,4 +26,14 @@ body,
 
 body {
   margin: 0;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+}
+
+* {
+  box-sizing: border-box;
 }
