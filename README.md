@@ -753,9 +753,3 @@ Then open the Vite URL shown in the terminal.
 ## 24. Project objective in one sentence
 
 > **AI Finance Controller is an agentic AI platform that automates financial reconciliation and exception investigation while combining RAG, deterministic finance policies, guardrails, and human-in-the-loop approval to make financial operations faster, explainable, and auditable.**
-
----
-
-## License
-
-Add the appropriate license for your repository if required.
