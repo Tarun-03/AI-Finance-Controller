@@ -16,6 +16,7 @@ from app.agents.nodes import (
     retrieve_policies_node,
     llm_investigation_node,
     mcp_evidence_node,
+    persist_decision_node,
 )
 from app.agents.state import FinanceAgentState
 
@@ -106,6 +107,14 @@ def build_finance_graph(
     )
 
     builder.add_node(
+        "persist_decision",
+        partial(
+            persist_decision_node,
+            db=db,
+        ),
+    )
+
+    builder.add_node(
         "resolve",
         resolve_node,
     )
@@ -188,8 +197,13 @@ def build_finance_graph(
     # Guardrail -> Action
     # -------------------------
 
-    builder.add_conditional_edges(
+    builder.add_edge(
         "guardrail",
+        "persist_decision",
+    )
+
+    builder.add_conditional_edges(
+        "persist_decision",
         route_after_guardrail,
     )
 

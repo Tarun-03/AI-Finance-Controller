@@ -4,10 +4,18 @@ from sqlalchemy.orm import Session
 
 from app.agents.state import FinanceAgentState
 from app.models.exception import ExceptionRecord
+from app.models.enums import ExceptionStatus
 from app.models.transaction import Transaction
 from app.services.llm_service import LLMService
 from app.rag.retriever import retrieve_policies
 
+from app.models.enums import (
+    AuditAction,
+    AuditActor,
+    ExceptionStatus,
+)
+
+from app.services.audit_service import create_audit_log
 
 AUTO_RESOLVE_LIMIT = Decimal("100.00")
 HUMAN_REVIEW_LIMIT = Decimal("1000.00")
@@ -310,6 +318,78 @@ def guardrail_node(
             f"{llm_recommendation or 'N/A'}."
         ),
     }
+
+def persist_decision_node(
+    state: FinanceAgentState,
+    db: Session,
+) -> FinanceAgentState:
+
+    if state.get("error"):
+        return {}
+
+    exception = db.get(
+        ExceptionRecord,
+        state["exception_id"],
+    )
+
+    if exception is None:
+        return {
+            "error": "Exception not found during decision persistence.",
+        }
+
+    recommendation = state.get("recommendation")
+    agent_confidence = state.get("agent_confidence")
+    reasoning = state.get("reasoning")
+
+    exception.agent_decision = recommendation
+    exception.agent_confidence = agent_confidence
+
+    if recommendation == "AUTO_RESOLVE":
+        exception.status = ExceptionStatus.RESOLVED
+
+    elif recommendation == "HUMAN_REVIEW":
+        exception.status = ExceptionStatus.INVESTIGATING
+
+    elif recommendation == "ESCALATE":
+        exception.status = ExceptionStatus.ESCALATED
+
+    create_audit_log(
+        db,
+        action=AuditAction.AGENT_DECISION,
+        actor=AuditActor.AGENT,
+        transaction_id=exception.transaction_id,
+        input_summary=(
+            f"Exception {exception.id}"
+        ),
+        output_summary=(
+            f"Agent decision: {recommendation}"
+        ),
+        reason=reasoning,
+        confidence=agent_confidence,
+    )
+
+    if recommendation == "AUTO_RESOLVE":
+        create_audit_log(
+            db,
+            action=AuditAction.EXCEPTION_RESOLVED,
+            actor=AuditActor.AGENT,
+            transaction_id=exception.transaction_id,
+            input_summary=(
+                f"Exception {exception.id}"
+            ),
+            output_summary=(
+                "Exception automatically resolved."
+            ),
+            reason=(
+                reasoning
+                or "Within automatic resolution threshold."
+            ),
+            confidence=agent_confidence,
+        )
+
+    db.commit()
+
+    return {}
 
 
 def resolve_node(
