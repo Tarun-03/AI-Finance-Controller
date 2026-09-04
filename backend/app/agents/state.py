@@ -51,3 +51,12 @@ class FinanceAgentState(TypedDict, total=False):
     agent_analysis: str | None
     agent_recommendation: str | None
     agent_confidence: Decimal | None
+
+        # MCP evidence
+    mcp_transaction: dict | None
+    mcp_payment: dict | None
+    mcp_settlement: dict | None
+    mcp_invoice: dict | None
+    mcp_exception: dict | None
+    mcp_reconciliation: dict | None
+    mcp_differences: dict | None

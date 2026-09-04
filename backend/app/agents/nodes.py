@@ -6,6 +6,7 @@ from app.agents.state import FinanceAgentState
 from app.models.exception import ExceptionRecord
 from app.models.transaction import Transaction
 from app.services.llm_service import LLMService
+from app.rag.retriever import retrieve_policies
 
 
 AUTO_RESOLVE_LIMIT = Decimal("100.00")
@@ -213,6 +214,11 @@ def llm_investigation_node(
         "recommendation": state.get(
             "recommendation"
         ),
+
+        "retrieved_policies": state.get(
+            "retrieved_policies",
+            [],
+),
     }
 
     service = LLMService()
@@ -341,4 +347,74 @@ def failed_node(
 
     return {
         "final_action": "FAILED",
+    }
+
+def retrieve_policies_node(
+    state: FinanceAgentState,
+    db: Session,
+) -> FinanceAgentState:
+
+    if state.get("error"):
+        return {}
+
+    query = " ".join(
+        [
+            state.get("exception_type", ""),
+            state.get("severity", ""),
+            state.get("description", ""),
+            f"difference {state.get('difference', '')}",
+        ]
+    )
+
+    policies = retrieve_policies(
+        db,
+        query,
+        top_k=3,
+    )
+
+    return {
+        "retrieved_policies": policies,
+    }
+
+def mcp_evidence_node(
+    state: FinanceAgentState,
+) -> FinanceAgentState:
+
+    if state.get("error"):
+        return {}
+
+    from app.mcp.server import (
+        transaction_lookup,
+        payment_lookup,
+        settlement_lookup,
+        invoice_lookup,
+        exception_lookup,
+        reconciliation_lookup,
+        reconciliation_difference,
+    )
+
+    transaction_id = state["transaction_id"]
+    exception_id = state["exception_id"]
+    reconciliation_id = state["reconciliation_id"]
+
+    transaction = transaction_lookup(transaction_id)
+    payment = payment_lookup(transaction_id)
+    settlement = settlement_lookup(transaction_id)
+    invoice = invoice_lookup(transaction_id)
+    exception = exception_lookup(exception_id)
+    reconciliation = reconciliation_lookup(
+        reconciliation_id
+    )
+    differences = reconciliation_difference(
+        transaction_id
+    )
+
+    return {
+        "mcp_transaction": transaction,
+        "mcp_payment": payment,
+        "mcp_settlement": settlement,
+        "mcp_invoice": invoice,
+        "mcp_exception": exception,
+        "mcp_reconciliation": reconciliation,
+        "mcp_differences": differences,
     }

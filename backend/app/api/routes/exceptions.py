@@ -5,7 +5,15 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
 from app.repositories import exception_repository
+from app.schemas.agent import (
+    HumanDecisionRequest,
+    HumanDecisionResponse,
+)
 from app.schemas.exception import ExceptionResponse
+from app.services.exception_service import (
+    approve_exception,
+    reject_exception,
+)
 
 
 router = APIRouter(
@@ -54,3 +62,49 @@ def get_exception(
         )
 
     return exception
+
+
+@router.post(
+    "/{exception_id}/approve",
+    response_model=HumanDecisionResponse,
+)
+def approve_finance_exception(
+    exception_id: UUID,
+    request: HumanDecisionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return approve_exception(
+            db,
+            exception_id,
+            request.reason,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+
+@router.post(
+    "/{exception_id}/reject",
+    response_model=HumanDecisionResponse,
+)
+def reject_finance_exception(
+    exception_id: UUID,
+    request: HumanDecisionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return reject_exception(
+            db,
+            exception_id,
+            request.reason,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )

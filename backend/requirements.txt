@@ -16,3 +16,6 @@ httpx
 langgraph
 langchain
 langchain-core
+
+sentence-transformers
+mcp

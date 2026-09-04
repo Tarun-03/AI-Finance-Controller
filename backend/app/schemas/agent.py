@@ -43,3 +43,14 @@ class AgentInvestigationResponse(BaseModel):
     final_action: str | None = None
 
     error: str | None = None
+
+
+class HumanDecisionRequest(BaseModel):
+    reason: str | None = None
+
+
+class HumanDecisionResponse(BaseModel):
+    exception_id: str
+    status: str
+    decision: str
+    reason: str | None = None

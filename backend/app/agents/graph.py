@@ -13,7 +13,9 @@ from app.agents.nodes import (
     human_review_node,
     load_context_node,
     resolve_node,
+    retrieve_policies_node,
     llm_investigation_node,
+    mcp_evidence_node,
 )
 from app.agents.state import FinanceAgentState
 
@@ -21,18 +23,13 @@ from app.agents.state import FinanceAgentState
 def route_after_context(
     state: FinanceAgentState,
 ) -> Literal[
-    "assess_risk",
+    "mcp_evidence",
     "failed",
 ]:
-    """
-    Route execution after loading the exception
-    and transaction context.
-    """
-
     if state.get("error"):
         return "failed"
 
-    return "assess_risk"
+    return "mcp_evidence"
 
 
 def route_after_guardrail(
@@ -42,20 +39,10 @@ def route_after_guardrail(
     "human_review",
     "escalate",
 ]:
-    """
-    Determine the final execution path.
-
-    Guardrails always have authority over the
-    final action.
-    """
-
-    # Any guardrail failure goes to human review.
     if not state.get("guardrail_passed"):
         return "human_review"
 
-    recommendation = state.get(
-        "recommendation"
-    )
+    recommendation = state.get("recommendation")
 
     if recommendation == "AUTO_RESOLVE":
         return "resolve"
@@ -69,23 +56,31 @@ def route_after_guardrail(
 def build_finance_graph(
     db: Session,
 ):
-    """
-    Build and compile the finance controller
-    LangGraph workflow.
-    """
-
     builder = StateGraph(
         FinanceAgentState
     )
 
-    # --------------------------------------------------
-    # NODES
-    # --------------------------------------------------
+    # -------------------------
+    # Nodes
+    # -------------------------
 
     builder.add_node(
         "load_context",
         partial(
             load_context_node,
+            db=db,
+        ),
+    )
+
+    builder.add_node(
+        "mcp_evidence",
+        mcp_evidence_node,
+    )
+
+    builder.add_node(
+        "retrieve_policies",
+        partial(
+            retrieve_policies_node,
             db=db,
         ),
     )
@@ -130,63 +125,77 @@ def build_finance_graph(
         failed_node,
     )
 
-    # --------------------------------------------------
-    # START
-    # --------------------------------------------------
+    # -------------------------
+    # Start
+    # -------------------------
 
     builder.add_edge(
         START,
         "load_context",
     )
 
-    # --------------------------------------------------
-    # CONTEXT → RISK
-    # --------------------------------------------------
+    # -------------------------
+    # Context -> RAG
+    # -------------------------
 
     builder.add_conditional_edges(
         "load_context",
         route_after_context,
     )
 
-    # --------------------------------------------------
-    # RISK → DECISION
-    # --------------------------------------------------
+    builder.add_edge(
+        "mcp_evidence",
+        "retrieve_policies",
+    )
+
+    # -------------------------
+    # RAG -> Risk
+    # -------------------------
+
+    builder.add_edge(
+        "retrieve_policies",
+        "assess_risk",
+    )
+
+    # -------------------------
+    # Risk -> Decision
+    # -------------------------
 
     builder.add_edge(
         "assess_risk",
         "decide_action",
     )
 
-    # --------------------------------------------------
-    # DECISION → LLM INVESTIGATION
-    # --------------------------------------------------
+    # -------------------------
+    # Decision -> LLM
+    # -------------------------
 
     builder.add_edge(
         "decide_action",
         "llm_investigation",
     )
 
-    # --------------------------------------------------
-    # LLM INVESTIGATION → GUARDRAIL
-    # --------------------------------------------------
+    # -------------------------
+    # LLM -> Guardrail
+    # -------------------------
 
     builder.add_edge(
         "llm_investigation",
         "guardrail",
     )
 
-    # --------------------------------------------------
-    # GUARDRAIL → FINAL ACTION
-    # --------------------------------------------------
+    # -------------------------
+    # Guardrail -> Action
+    # -------------------------
 
     builder.add_conditional_edges(
         "guardrail",
         route_after_guardrail,
     )
 
-    # --------------------------------------------------
-    # TERMINAL NODES
-    # --------------------------------------------------
+    # -------------------------
+    # End states
+    # -------------------------
 
     builder.add_edge(
         "resolve",
