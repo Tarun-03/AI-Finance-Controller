@@ -503,7 +503,7 @@ function Sidebar({
     <aside className="sidebar">
       <div className="brand">
         <div className="brand-mark">
-          <span>₿</span>
+          <span>FAI</span>
         </div>
 
         <div>
@@ -644,7 +644,7 @@ function Header({
           ↻
         </button>
 
-        <div className="user-avatar">F</div>
+        <div className="user-avatar">👤</div>
       </div>
     </header>
   )
