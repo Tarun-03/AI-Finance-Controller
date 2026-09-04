@@ -2,8 +2,7 @@
 
 An **agentic AI finance-operations platform** for automated reconciliation, exception investigation, and human-in-the-loop financial controls.
 
-> **Project status:** Local development / demo project. The application is **not currently hosted on Render or Vercel**.
-
+> **Project status:** Local development / demo project.
 ---
 
 ## 1. What does this project solve?
